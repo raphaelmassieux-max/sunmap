@@ -1,0 +1,21 @@
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+h1 {
+  margin: 10px;
+  font-size: 18px;
+}
+
+#map {
+  flex: 1;
+}
+
+#timeSlider {
+  margin: 10px;
+  width: 80%;
+}
