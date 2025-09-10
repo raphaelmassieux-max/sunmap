@@ -9,18 +9,32 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 
 <style>
-  html, body { margin:0; padding:0; height:100%; }
+  html, body { margin:0; padding:0; height:100%; font-family:'Segoe UI', sans-serif; }
   #map { height: 100%; width: 100%; }
+
   #timeControl {
     position: absolute;
     top: 10px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(255,255,255,0.9);
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-family: sans-serif;
+    background: rgba(30,30,30,0.85);
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 12px;
     z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  #timeSlider { width: 150px; }
+  #playBtn {
+    background: #FFD700;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-weight: bold;
   }
 </style>
 </head>
@@ -28,8 +42,9 @@
 
 <div id="map"></div>
 <div id="timeControl">
-  Hour: <span id="timeLabel">12:00</span>
+  <span>Hour: <span id="timeLabel">12:00</span></span>
   <input type="range" id="timeSlider" min="0" max="23" value="12">
+  <button id="playBtn">▶️</button>
 </div>
 
 <!-- Leaflet JS -->
@@ -39,13 +54,10 @@
 <!-- Turf.js -->
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
-<!-- Your main script -->
 <script>
-// ------------------------
-// Paris Sunlight Map Script
-// ------------------------
 let map, streetData=[], buildingData=[];
 let streetLayer, buildingLayer;
+let playing = false;
 
 // Helper: UTC date for slider
 function getDateForHour(hour){
@@ -100,7 +112,9 @@ function drawStreets(lat,lon,hour){
           [p2[0]-offsetLat,p2[1]-offsetLon],
           [p1[0]-offsetLat,p1[1]-offsetLon]
         ];
-        L.polygon(quad,{color:"none",fillColor:"gold",fillOpacity:0.7,weight:0}).addTo(streetLayer);
+        // gradient effect: brighter when sun is higher
+        const opacity = Math.min(0.7, 0.3 + altDeg/90);
+        L.polygon(quad,{color:"none",fillColor:"gold",fillOpacity:opacity,weight:0,smoothFactor:1}).addTo(streetLayer);
       }
     }
   });
@@ -119,7 +133,7 @@ function drawBuildings(lat,lon,hour){
   buildingData.forEach(b=>{
     if(!b.geometry || b.geometry.length<3) return;
     const footprint=b.geometry.map(pt=>[pt.lat,pt.lon]);
-    L.polygon(footprint,{color:"#555",fillColor:"#999",fillOpacity:0.6,weight:1}).addTo(buildingLayer);
+    L.polygon(footprint,{color:"#555",fillColor:"#333",fillOpacity:0.3,weight:1}).addTo(buildingLayer);
   });
 }
 
@@ -142,9 +156,9 @@ async function initMap(){
   const lat=48.8566, lon=2.3522;
   map=L.map('map').setView([lat,lon],17);
 
-  // Minimalist Carto tiles
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
-    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
+  // Dark minimalist tiles
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+    attribution:'&copy; OpenStreetMap &copy; CARTO',
     subdomains:'abcd',maxZoom:19
   }).addTo(map);
 
@@ -163,6 +177,23 @@ async function initMap(){
     label.textContent=localTime.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     updateScene(map.getCenter().lat,map.getCenter().lng,hour);
   });
+
+  // Play/pause animation
+  const playBtn=document.getElementById("playBtn");
+  playBtn.addEventListener("click",()=>{
+    playing = !playing;
+    playBtn.textContent = playing ? "⏸️" : "▶️";
+    if(playing) animateSun();
+  });
+}
+
+// Animate sun
+function animateSun(){
+  if(!playing) return;
+  let slider=document.getElementById("timeSlider");
+  slider.value = (parseInt(slider.value)+1)%24;
+  slider.dispatchEvent(new Event('input'));
+  setTimeout(animateSun, 500);
 }
 
 initMap();
