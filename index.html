@@ -5,71 +5,50 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Paris Sunlight Map</title>
 
-<!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-
 <style>
-  html, body { margin:0; padding:0; height:100%; font-family:'Segoe UI', sans-serif; }
-  #map { height: 100%; width: 100%; }
-
+  html, body { margin:0; padding:0; height:100%; }
+  #map { height:100%; width:100%; }
   #timeControl {
-    position: absolute;
-    top: 10px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(30,30,30,0.85);
-    color: #fff;
-    padding: 10px 16px;
-    border-radius: 12px;
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    position:absolute; top:10px; left:50%; transform:translateX(-50%);
+    background: rgba(255,255,255,0.9); padding:8px 12px; border-radius:8px;
+    font-family:sans-serif; z-index:1000; width: 300px;
   }
-
-  #timeSlider { width: 150px; }
-  #playBtn {
-    background: #FFD700;
-    border: none;
-    border-radius: 6px;
-    padding: 4px 8px;
-    cursor: pointer;
-    font-weight: bold;
-  }
+  #timeSlider { width: 100%; }
 </style>
 </head>
 <body>
 
 <div id="map"></div>
 <div id="timeControl">
-  <span>Hour: <span id="timeLabel">12:00</span></span>
-  <input type="range" id="timeSlider" min="0" max="23" value="12">
-  <button id="playBtn">▶️</button>
+  Hour: <span id="timeLabel">--:--</span>
+  <input type="range" id="timeSlider" min="0" max="900" value="360">
 </div>
 
-<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-<!-- SunCalc JS -->
 <script src="https://cdn.jsdelivr.net/npm/suncalc@1.9.0/suncalc.js"></script>
-<!-- Turf.js -->
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
 <script>
 let map, streetData=[], buildingData=[];
-let streetLayer, buildingLayer;
-let playing = false;
+let streetLayer, buildingLayer, shadowLayer;
+const apiKey = "YOUR_OPENWEATHERMAP_KEY"; // <-- replace with your key
 
-// Helper: UTC date for slider
-function getDateForHour(hour){
-  const d=new Date();
-  return new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate(),hour,0,0));
+function getDateForSlider(minutes){
+  const now = new Date();
+  const utc = new Date(now.getTime() + now.getTimezoneOffset()*60000);
+  const paris = new Date(utc.getTime() + 2*3600*1000);
+  const hour = Math.floor(minutes/60)+7;
+  const minute = minutes%60;
+  paris.setHours(hour, minute, 0, 0);
+  return paris;
 }
 
-// Fetch OSM streets/buildings
+// Fetch OSM data
 async function fetchData(lat,lon){
   const query=`[out:json][timeout:25];(
-    way(around:300,${lat},${lon})["highway"];
-    way(around:300,${lat},${lon})["building"];
+    way(around:500,${lat},${lon})["highway"];
+    way(around:500,${lat},${lon})["building"];
   );out geom tags;`;
   const url="https://overpass-api.de/api/interpreter?data="+encodeURIComponent(query);
   const res=await fetch(url);
@@ -77,123 +56,151 @@ async function fetchData(lat,lon){
   return data.elements;
 }
 
-// Draw streets (lit only)
-function drawStreets(lat,lon,hour){
+// Fetch weather
+async function fetchWeather(lat,lon){
+  try{
+    const res = await fetch(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}`);
+    const w = await res.json();
+    return Math.max(0.2, 1 - (w.clouds?.all||0)/100);
+  }catch(e){ return 1; }
+}
+
+// Draw streets
+function drawStreets(lat,lon,date,weatherFactor){
   if(streetLayer) streetLayer.clearLayers();
   streetLayer=L.layerGroup().addTo(map);
 
-  const now=getDateForHour(hour);
-  const sunPos=SunCalc.getPosition(now,lat,lon);
-  const azimuthDeg=(sunPos.azimuth*180/Math.PI+180)%360;
-  const altDeg=sunPos.altitude*180/Math.PI;
+  const sunPos = SunCalc.getPosition(date,lat,lon);
+  const altDeg = sunPos.altitude*180/Math.PI;
   if(altDeg<=0) return;
 
-  const roadWidth=6; // meters
+  const azimuthDeg = (sunPos.azimuth*180/Math.PI+180)%360;
+  const baseOpacity = 0.1;
+  const maxOpacity = 0.6;
+
+  const roadWidth = 6;
 
   streetData.forEach(way=>{
-    if(!way.tags) return;
-    if(!['primary','secondary','tertiary','residential'].includes(way.tags.highway)) return;
+    if(!way.tags || !['primary','secondary','tertiary','residential'].includes(way.tags.highway)) return;
     if(!way.geometry || way.geometry.length<2) return;
 
-    const latlngs=way.geometry.map(pt=>[pt.lat,pt.lon]);
+    const latlngs = way.geometry.map(pt=>[pt.lat,pt.lon]);
     for(let i=0;i<latlngs.length-1;i++){
-      const p1=latlngs[i], p2=latlngs[i+1];
-      const dx=p2[1]-p1[1], dy=p2[0]-p1[0];
-      const angle=(Math.atan2(dx,dy)*180/Math.PI+360)%360;
-      const diff=Math.abs(angle-azimuthDeg);
-      const minDiff=Math.min(diff,360-diff);
-      if(minDiff<20){
-        const segLen=Math.sqrt(dx*dx+dy*dy);
-        const offsetLat=(roadWidth/110540)*(dx/segLen);
-        const offsetLon=(roadWidth/111320)*(-dy/segLen);
-        const quad=[
-          [p1[0]+offsetLat,p1[1]+offsetLon],
-          [p2[0]+offsetLat,p2[1]+offsetLon],
-          [p2[0]-offsetLat,p2[1]-offsetLon],
-          [p1[0]-offsetLat,p1[1]-offsetLon]
-        ];
-        // gradient effect: brighter when sun is higher
-        const opacity = Math.min(0.7, 0.3 + altDeg/90);
-        L.polygon(quad,{color:"none",fillColor:"gold",fillOpacity:opacity,weight:0,smoothFactor:1}).addTo(streetLayer);
-      }
+      const p1 = latlngs[i], p2=latlngs[i+1];
+      const dx = p2[1]-p1[1], dy = p2[0]-p1[0];
+      const segLen = Math.sqrt(dx*dx+dy*dy);
+      const offsetLat = (roadWidth/110540)*(dx/segLen);
+      const offsetLon = (roadWidth/111320)*(-dy/segLen);
+
+      // azimuth alignment
+      const angle = (Math.atan2(dx,dy)*180/Math.PI+360)%360;
+      const diff = Math.min(Math.abs(angle-azimuthDeg), 360-Math.abs(angle-azimuthDeg));
+      const segmentFactor = diff<20 ? 1 : 0.2;
+
+      const opacity = (baseOpacity + (maxOpacity-baseOpacity)*(altDeg/90))*segmentFactor*weatherFactor;
+
+      const quad = [
+        [p1[0]+offsetLat, p1[1]+offsetLon],
+        [p2[0]+offsetLat, p2[1]+offsetLon],
+        [p2[0]-offsetLat, p2[1]-offsetLon],
+        [p1[0]-offsetLat, p1[1]-offsetLon]
+      ];
+      L.polygon(quad,{color:"none",fillColor:"gold",fillOpacity:opacity,weight:0}).addTo(streetLayer);
     }
   });
 }
 
-// Draw buildings (shadows transparent)
-function drawBuildings(lat,lon,hour){
+// Draw buildings
+function drawBuildings(lat,lon){
   if(buildingLayer) buildingLayer.clearLayers();
   buildingLayer=L.layerGroup().addTo(map);
-
-  const now=getDateForHour(hour);
-  const sunPos=SunCalc.getPosition(now,lat,lon);
-  const alt=sunPos.altitude;
-  if(alt<=0) return;
-
   buildingData.forEach(b=>{
     if(!b.geometry || b.geometry.length<3) return;
     const footprint=b.geometry.map(pt=>[pt.lat,pt.lon]);
-    L.polygon(footprint,{color:"#555",fillColor:"#333",fillOpacity:0.3,weight:1}).addTo(buildingLayer);
+    L.polygon(footprint,{color:"#555",fillColor:"#999",fillOpacity:0.1,weight:1}).addTo(buildingLayer);
+  });
+}
+
+// Draw shadows
+function drawShadows(lat,lon,date){
+  if(shadowLayer) shadowLayer.clearLayers();
+  shadowLayer=L.layerGroup().addTo(map);
+
+  const sunPos = SunCalc.getPosition(date,lat,lon);
+  if(sunPos.altitude<=0) return;
+  const az = sunPos.azimuth+Math.PI;
+
+  buildingData.forEach(b=>{
+    if(!b.geometry || b.geometry.length<3 || !b.height) return;
+    const shadowLen = b.height/Math.tan(sunPos.altitude);
+    const footprint = b.geometry.map(pt=>[pt.lon,pt.lat]);
+    const shadowPolyCoords = footprint.map(pt=>{
+      const dx = shadowLen * Math.sin(az)/111320;
+      const dy = shadowLen * Math.cos(az)/110540;
+      return [pt[0]+dx, pt[1]+dy];
+    });
+    const shadowTurf = turf.polygon([shadowPolyCoords]);
+
+    streetData.forEach(street=>{
+      if(!street.geometry || street.geometry.length<2) return;
+      const streetCoords = street.geometry.map(pt=>[pt.lon,pt.lat]);
+      const roadWidth = 6/111320;
+      const streetLine = turf.lineString(streetCoords);
+      const streetPoly = turf.buffer(streetLine, roadWidth, {units:"degrees"});
+      const intersect = turf.intersect(shadowTurf, streetPoly);
+      if(intersect){
+        const coords = intersect.geometry.coordinates[0].map(c=>[c[1],c[0]]);
+        L.polygon(coords, {fillColor:"red", fillOpacity:0.6, weight:0}).addTo(shadowLayer);
+
+      }
+    });
   });
 }
 
 // Update scene
-function updateScene(lat,lon,hour){
-  drawStreets(lat,lon,hour);
-  drawBuildings(lat,lon,hour);
+async function updateScene(lat,lon,date){
+  const weatherFactor = await fetchWeather(lat,lon);
+  drawStreets(lat,lon,date,weatherFactor);
+  drawBuildings(lat,lon);
+  drawShadows(lat,lon,date);
 }
 
-// Fetch new data
-async function updateData(lat,lon,hour){
-  const elements=await fetchData(lat,lon);
-  streetData=elements.filter(e=>e.tags&&e.tags.highway);
-  buildingData=elements.filter(e=>e.tags&&e.tags.building&&e.geometry.length>=3);
-  updateScene(lat,lon,hour);
+// Fetch data
+async function updateData(lat,lon,date){
+  const elements = await fetchData(lat,lon);
+  streetData = elements.filter(e=>e.tags&&e.tags.highway);
+  buildingData = elements.filter(e=>e.tags&&e.tags.building&&e.geometry.length>=3);
+  updateScene(lat,lon,date);
 }
 
-// Initialize map
+// Init map
 async function initMap(){
   const lat=48.8566, lon=2.3522;
   map=L.map('map').setView([lat,lon],17);
 
-  // Dark minimalist tiles
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-    attribution:'&copy; OpenStreetMap &copy; CARTO',
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
+    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
     subdomains:'abcd',maxZoom:19
   }).addTo(map);
 
-  await updateData(lat,lon,12);
+  const now = new Date();
+  const parisMinutes = Math.max(0,Math.min(900,(now.getHours()-7)*60+now.getMinutes()));
+  const slider = document.getElementById("timeSlider");
+  slider.value = parisMinutes;
+  const date = getDateForSlider(slider.value);
+  document.getElementById("timeLabel").textContent = date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+  await updateData(lat,lon,date);
 
   map.on("click", async(e)=>{
-    const hour=parseInt(document.getElementById("timeSlider").value);
-    await updateData(e.latlng.lat,e.latlng.lng,hour);
+    await updateData(e.latlng.lat,e.latlng.lng,getDateForSlider(slider.value));
   });
 
-  const slider=document.getElementById("timeSlider");
-  const label=document.getElementById("timeLabel");
-  slider.addEventListener("input",()=>{
-    const hour=parseInt(slider.value,10);
-    const localTime=getDateForHour(hour);
-    label.textContent=localTime.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    updateScene(map.getCenter().lat,map.getCenter().lng,hour);
+  slider.addEventListener("input", ()=>{
+    const date = getDateForSlider(parseInt(slider.value,10));
+    document.getElementById("timeLabel").textContent = date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    updateScene(map.getCenter().lat,map.getCenter().lng,date);
   });
-
-  // Play/pause animation
-  const playBtn=document.getElementById("playBtn");
-  playBtn.addEventListener("click",()=>{
-    playing = !playing;
-    playBtn.textContent = playing ? "⏸️" : "▶️";
-    if(playing) animateSun();
-  });
-}
-
-// Animate sun
-function animateSun(){
-  if(!playing) return;
-  let slider=document.getElementById("timeSlider");
-  slider.value = (parseInt(slider.value)+1)%24;
-  slider.dispatchEvent(new Event('input'));
-  setTimeout(animateSun, 500);
 }
 
 initMap();
